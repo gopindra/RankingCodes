@@ -1,0 +1,929 @@
+// GSN: Removed all global variables and use of seeds so that cdfmvnaT can be called from inside threaded for loops
+// GSN: cdfmvnaT calls the 1D normal distribution function if 1D inputs are given
+
+/****************************************************************************************************************************************************
+                                                     Written by C. Bhat, May 2017
+                                                      (C) Copyright 2017 by Bhat 
+                                                          All Rights Reserved
+            Approximating multivariate normal non-standard CDF (and corresponding gradient functions) using different analytic approaches     
+*****************************************************************************************************************************************************/
+
+/*****************************************************************************************************************************************************
+                                                         The OVUS Method
+*****************************************************************************************************************************************************/
+
+proc (1) = cdfmvnaOVUS(a,rr);
+    local m,rr10,mutemp,s1,sigtemp,sigtemp1,mutemp1,cortemp,newtemp,p,mutilde,omega,temp1,L,D,atemp,h;
+    m=cols(a);
+    p = zeros(m-1,1); 
+    temp1 = seqa(1,1,m);
+    atemp = a[temp1];
+    mutemp=zeros(m,1); 
+    sigtemp = rr[temp1,temp1];
+    p[1]=cdfbvn(atemp[1],atemp[2],sigtemp[1,2]);
+    { L, D } = ldltblock(sigtemp,1);
+    for h (1,m-2,1);
+       { mutilde,omega } = univariatenormaltrunc(mutemp[1],D[1,1],atemp[h]);
+       mutemp = mutemp[2:m-h+1]+L[2:m-h+1,1]*(mutilde-mutemp[1]);
+       { L, D } = ldltupspecial(L,D,omega,1);        
+       sigtemp1 = L[1:2,1:2]*D[1:2,1:2]*((L[1:2,1:2])');
+       p[h+1] = noncdfbvn(mutemp[1:2],sigtemp1,((atemp[h+1:h+2])'))/(noncdfn(mutemp[1],sigtemp1[1,1],atemp[h+1]));   
+    endfor;
+    retp(prodc(p));
+endp;
+
+proc(2) = univariatenormaltrunc(muuntrunc,siguntrunc,trpoint);
+  local sig,lam,w,mutilde,mutrunc,sigtrunc; 
+  sig = sqrt(siguntrunc);
+  w = (trpoint-muuntrunc)./sig;
+  lam = (-pdfn(w))./cdfn(w);
+  mutrunc = muuntrunc+(sig.*lam);
+  sigtrunc = siguntrunc.*(1+(lam.*(w-lam)));  
+  retp(mutrunc,sigtrunc);  
+endp;
+
+proc (1) = noncdfbvn(mu,cov,x);
+    local om,sqrtom,kk1,kk2,rho;
+    om = diag(cov);
+    sqrtom = sqrt(om);
+    kk1 = (x-mu)./sqrtom;
+    kk2 = corrvc(cov);  
+    /* This next line is needed because some diagonal elements of kk2 computed above are slightly greater than 1 because of the algebra in computing
+       correlations from corrvc, so ensuring that diagonal elements are no more than 1 */
+    kk2 = diagrv(kk2,ones(2,1));     
+    rho = kk2[1,2];
+    retp(cdfbvn(kk1[1],kk1[2],rho));
+endp;
+
+proc (2) = ldltupspecial(L,D,omega,m);   
+   local D2,n,n1,newA,Dinv,z,t,B,tt,M1,L22,knew,i,j,h1,h,newL,newD;
+   n=rows(L);    n1 = n-m;
+   M1 = omega;
+   D2 = D[m+1:n,m+1:n];
+   B = zeros(n1,m);
+   L22 = L[m+1:n,m+1:n];
+   z = (inv(L22))*L[m+1:n,1:m];
+   NewL = eye(n1);
+   NewD = zeros(n1,n1);
+   if n1<=m;
+       newL = eye(n1);
+       newD = z[1:n1,.]*omega*((z[1:n1,.])')+D2;
+   else;
+       for i(1,n1,m);
+          if i+m-1<=n1;
+             t = M1*((z[i:i+m-1,.])');
+             NewD[i:i+m-1,i:i+m-1] = D2[i:i+m-1,i:i+m-1] +z[i:i+m-1,.]*t;
+             Dinv = inv(NewD[i:i+m-1,i:i+m-1]);
+             b[i:i+m-1,.]=((t*Dinv)');
+             M1 = M1-t*Dinv*t';
+             if i<n1-m+1;
+                if i!=n1-m;
+                   newL[i+m:i+2*m-1,1:i+m-1]=z[i+m:i+2*m-1,.]*((b[1:i+m-1,.])');
+                elseif i==n1-m;
+                   newL[i+m,1:i+m-1]=z[i+m,.]*((b[1:i+m-1,.])'); 
+                endif;
+             endif;  
+          elseif i==n1;
+             t = M1*((z[i,.])');
+             NewD[i,i] = D2[i,i] +z[i,.]*t;
+          endif;
+       endfor;
+   endif;
+   retp(L22*newL,newD); 
+endp;  
+
+proc (2) = ldLtblock(A,m);
+   local n,L,D,i,j,h;
+   n=rows(A);
+   L = eye(n); 
+   D = zeros(n,n);
+   for i(1,n-m,m);
+       j=i+m-1; h=j+1; 
+       D[i:j,i:j]=A[i:j,i:j];
+       L[h:n,i:j]=A[h:n,i:j]*invpd(D[i:j,i:j]);
+       A[h:n,h:n]=A[h:n,h:n]-L[h:n,i:j]*D[i:j,i:j]*((L[h:n,i:j])');
+   endfor;
+   D[h:n,h:n]=A[h:n,h:n];   
+   retp(L,D); 
+endp;
+
+proc (3) = pdfmvnaOVUS(a,rr);
+    local m,rr10,s1,mutemp,sigtemp,p,gp1,gcumulmumean,gcumulmucov,gcumulXmean,gcumulXcov,grhorho,mutilde,omega,temp1,L,D,atemp,h;
+    local gw1,gw2,grho,gcumulfrompc,gY,tempnew,gmumean,gXmean,gCmean,gmucov,gXcov,gCcov,gcumulC,gcumulmusig,gfrompmu,gfrompcov,gfrompC,kkk,gC;
+    m=cols(a);
+    kkk = 2; /* Denotes the dimensionality of the numerator in p[h+1] computation */
+    p = zeros(m-1,1);
+    temp1 = seqa(1,1,m);
+    atemp = a[temp1];
+    mutemp=zeros(m,1); 
+    sigtemp = rr[temp1,temp1];
+    rr10=sigtemp;
+
+    p[1]=cdfbvn(atemp[1],atemp[2],sigtemp[1,2]);
+    { L, D } = ldltblock(sigtemp,1);
+    grhorho = zeros(m*(m-1)/2,1);
+    gC = zeros(m,1);
+    gcumulfrompc=zeros(m,1);
+    
+    local _condcovmeantrunc, _condcovsigtrunc;
+    
+    for h (1,m-2,1);
+       { mutilde,omega } = univariatenormaltrunc(mutemp[1],D[1,1],atemp[h]);        
+       if h==1; _condcovsigtrunc=0; _condcovmeantrunc=0;
+       else; _condcovsigtrunc=1; _condcovmeantrunc=1;
+       endif;
+       
+       { gY, gmumean, gXmean, gCmean } = gcondmeantrunc(eye(m-h),mutemp,sigtemp,atemp[h], _condcovmeantrunc);
+       { gmucov,gXcov,gCcov } = gcondcovtrunc(mutemp,sigtemp,atemp[h], _condcovsigtrunc);
+ 
+       if h==1;
+           gcumulmusig = gXmean~gXcov;
+           gcumulC = (gCmean~gCcov)|zeros(m-1,(m-1+((m-1)*(m)/2)));
+       elseif h > 1;
+           gcumulmusig = gcumulmusig*((gmumean~gmucov)|(gXmean~gXcov)); 
+           gcumulC = gcumulC*((gmumean~gmucov)|(gXmean~gXcov));     
+           gcumulC[h,.] = (gCmean~gCcov);
+       endif;
+       
+       mutemp = mutemp[2:m-h+1]+L[2:m-h+1,1]*(mutilde-mutemp[1]);
+       { L, D } = ldltupspecial(L,D,omega,1);
+       sigtemp = L*D*L'; 
+       
+       p[h+1] = noncdfbvn(mutemp[1:2],sigtemp[1:2,1:2],((atemp[h+1:h+2])'))/(noncdfn(mutemp[1],sigtemp[1,1],atemp[h+1]));
+
+       { gfrompmu,gfrompcov,gfrompC } = gradnoncdfbvnbycdfn(mutemp[1:2],sigtemp[1:2,1:2],((atemp[h+1:h+2])'));
+       grhorho = grhorho+(1/p[h+1])*(gcumulmusig[.,1:2]*gfrompmu+(gcumulmusig[.,m-h+1:m-h+2]~gcumulmusig[.,2*m-2*h+1])*gfrompcov);
+ 
+       gcumulfrompc[h+1:h+2] = gcumulfrompc[h+1:h+2]+(gfrompc/p[h+1]);  /* getting gradient contribution directly from noncdfbvn/noncdfn for absiccae except the first two */ 
+       gC = gC+(1/p[h+1])*(gcumulC[.,1:2]*gfrompmu+(gcumulC[.,m-h+1:m-h+2]~gcumulC[.,2*m-2*h+1])*gfrompcov);
+
+    endfor;
+    { gw1,gw2,grho } = gradcdfbvn(atemp[1],atemp[2],rr10[1,2]);
+
+    grhorho[1]=grhorho[1]+(grho./p[1]);  /* Adding contribution of rho12 from initial cdfbvn function */   
+    gC = gC+(gcumulfrompc);  /* Adding contribution of all abscissa originating from the probability function */
+    gC[1:2] = gC[1:2]+((gw1|gw2)./p[1]);   /* Inserting gradient contribution of first two abscissae directly from the cdfbvn function */
+
+
+    p = prodc(p);
+    gC=p*gC; grhorho = p*grhorho;
+    
+    tempnew = seqa(1,1,m)~temp1;
+    tempnew = sortc(tempnew,2);
+    tempnew = tempnew[.,1];
+    gC = (gC[tempnew]);
+    grhorho = matndupdiagzerofull((grhorho)); 
+    grhorho = submat(grhorho,tempnew,tempnew);
+    grhorho = (vecndup(grhorho));
+    
+    retp(p,gC,grhorho);  
+endp;   
+
+proc (4) = gcondmeantrunc(Y,mu,X,C, _condcovmeantrunc);
+    local dim1,dim2,dimdiff,X11,X12,X22,invX11,gY1,ggY,gmu,gx111,gX12,gX11,ggX,indic1,indic2,indic3,indic,ddcov,ddcor,dd1cov,dd1cor;
+    local gC,gmutilde,mutrunc,sigtrunc,gmutildenew,gmutrunc,gsigtrunc;
+    dim1 = rows(Y);
+    dim2 = rows(X);
+    dimdiff = dim2-dim1;
+    ddcov = (dimdiff*(dimdiff+1))/2;   /* These next four lines are to get a way of sequencing the gradients later to put in the right order of elements in matrix X */
+    ddcor = (dimdiff*(dimdiff-1))/2;
+    dd1cov = (dim1*(dim1+1))/2;
+    dd1cor = (dim1*(dim1-1))/2;
+    X11 = X[1:dimdiff,1:dimdiff];
+    X12 = X[dimdiff+1:rows(X),1:dimdiff];
+    X22 = X[dimdiff+1:rows(X),dimdiff+1:rows(X)];
+    invX11 = invpd(X11);
+       
+    gmutilde = ((Y*X12*invX11)');
+    gmu = -gmutilde|eye(dim1);
+
+    if dimdiff==1;
+       { mutrunc,sigtrunc } = univariatenormaltrunc(mu[1:dimdiff],X[1:dimdiff,1:dimdiff],C);
+       { gmutrunc,gsigtrunc } = gradunivariatenormaltrunc(mu[1:dimdiff],X[1:dimdiff,1:dimdiff],C);
+    elseif dimdiff==2;
+       { mutrunc,sigtrunc } = bivariatenormaltrunc(mu[1:dimdiff],X[1:dimdiff,1:dimdiff],C);        
+       { gmutrunc,gsigtrunc } = gradbivariatenormaltrunc(mu[1:dimdiff],X[1:dimdiff,1:dimdiff],C);
+    endif;
+        
+    gY1 = X12*invX11*(mutrunc-mu[1:dimdiff]);
+    ggY = diagrv(zeros(dim1,dim1),gY1);
+
+    gmutildenew = gmutrunc*gmutilde;
+    gmu[1:dimdiff,.] = (gmu[1:dimdiff,.])+gmutildenew[1:dimdiff,.];
+        
+    gX12 = Y.*.(invX11*(mutrunc-mu[1:dimdiff]));
+    indic1 = vectranspose(dim1,dimdiff);
+    gX12 = submat(gX12,indic1,0);
+
+    local _xinvsymmetric, _xinvdiagonal, _xinvcorrelation;
+    local _omsymmetric, _omdiagonal;
+    _omsymmetric=1; _omdiagonal=0;
+    if _condcovmeantrunc;
+        _xinvsymmetric=1; _xinvdiagonal=0; _xinvcorrelation=0;
+        indic2 = matdup(seqa(1,1,ddcov))~(reshape((seqa(ddcov+1,1,dimdiff*dim1)),dimdiff,dim1));
+        indic3 = zeros(dim1,dimdiff)~matdup(seqa(ddcov+dimdiff*dim1+1,1,dd1cov));
+        indic = vecdup(indic2|indic3);
+        gX11 = ginverse(X11, _xinvsymmetric, _xinvdiagonal, _xinvcorrelation)*gaomegab((Y*X12),(mutrunc-mu[1:dimdiff]), _omsymmetric, _omdiagonal);
+        gX11 = gX11+gmutildenew[dimdiff+1:dimdiff+dimdiff*((dimdiff+1)/2),.];
+        ggX = submat((gX11|gX12|zeros(dd1cov,dim1)),indic,0);
+    elseif _condcovmeantrunc==0;
+        _xinvsymmetric=1; _xinvdiagonal=0; _xinvcorrelation=1;
+        gX11 = ginverse(X11, _xinvsymmetric, _xinvdiagonal, _xinvcorrelation)*gaomegab((Y*X12),(mutrunc-mu[1:dimdiff]), _omsymmetric, _omdiagonal);
+        if dimdiff==2;
+           gX11 = gX11+gmutildenew[dimdiff+2,.];
+        endif;
+        if ddcor==0;  
+           indic2 = 0~(reshape((seqa(ddcor+1,1,dimdiff*dim1)),dimdiff,dim1));
+        else;
+           indic2 = matndupdiagzero(seqa(1,1,ddcor))~(reshape((seqa(ddcor+1,1,dimdiff*dim1)),dimdiff,dim1));
+        endif;
+        if dd1cor==0;
+           indic3 = zeros(dim1,dimdiff)~0;
+        else;
+           indic3 = zeros(dim1,dimdiff)~matndupdiagzero(seqa(ddcor+dimdiff*dim1+1,1,dd1cor));
+        endif;
+        indic = vecndup(indic2|indic3);       
+        if ddcor==0 and dd1cor==0;
+           ggX=gX12;
+        elseif ddcor==0 and dd1cor!=0;
+           ggX = gX12|(zeros(dd1cor,dim1));
+        elseif ddcor!=0 and dd1cor==0;
+           ggX = submat((gX11|gX12),indic,0);
+        else;
+           ggX = submat((gX11|gX12|(zeros(dd1cor,dim1))),indic,0);
+        endif;    
+    endif;
+     
+    gC = gmutildenew[dimdiff+dimdiff*((dimdiff+1)/2)+1:rows(gmutildenew),.];
+    retp(ggY,gmu,ggX,gC);
+endp;
+
+proc gaomegab(x1,x2, _omsymmetric, _omdiagonal);
+    local n,l,k,m,g,temp1,tempSelMatrix;
+    l = rows(x1);
+    k = cols(x1);
+    m = rows(x2);
+    n = cols(x2);
+    g = x1'.*.x2;    
+    if _omsymmetric;
+        temp1 = vecsymmetry(k); 
+        g = temp1*g;
+        if _omdiagonal;
+            tempselmatrix = vecdup(eye(k));            
+            g = selif(g,tempselmatrix);
+        endif;
+    endif;
+    retp(g);
+endp;
+
+proc (3) = gcondcovtrunc(MU,X,C, _condcovsigtrunc);
+    local dim1,dim2,dimdiff,B,X11,X12,X22,invX11,gg2new,X22condcov,ggY,gg2,gg22,gg23,gg22new,ggX,indic1,indic2,indic3,indic,ddcov,ddcor,dd1cov,dd1cor;
+    local gY,ginvx11,gBpsi11,gmu,gc,gB,gD1,gsigtildenew,gpsi11,gpsi22,gpsi12,gomegagrad,gbomega,gomega,gmutrunc,gsigtrunc,mutrunc,sigtrunc;
+
+    dim1 = rows(x)-rows(C); 
+    dim2 = rows(X);
+    dimdiff = dim2-dim1;   
+    ddcov = (dimdiff*(dimdiff+1))/2; 
+    ddcor = (dimdiff*(dimdiff-1))/2;
+    dd1cov = (dim1*(dim1+1))/2;
+    dd1cor = (dim1*(dim1-1))/2;
+
+    X11 = X[1:dimdiff,1:dimdiff];
+    X12 = X[dimdiff+1:rows(X),1:dimdiff];
+    X22 = X[dimdiff+1:rows(X),dimdiff+1:rows(X)];    
+
+    if dimdiff==1;
+        { mutrunc,sigtrunc } = univariatenormaltrunc(mu[1:dimdiff],X[1:dimdiff,1:dimdiff],C);
+        { gmutrunc,gsigtrunc } = gradunivariatenormaltrunc(mu[1:dimdiff],X[1:dimdiff,1:dimdiff],C);
+    elseif dimdiff==2;
+        { mutrunc,sigtrunc } = bivariatenormaltrunc(mu[1:dimdiff],X[1:dimdiff,1:dimdiff],C);        
+        { gmutrunc,gsigtrunc } = gradbivariatenormaltrunc(mu[1:dimdiff],X[1:dimdiff,1:dimdiff],C);
+    endif;
+    invX11 = invpd(X11);
+    B = invX11*sigtrunc*invX11;
+    local _condcov;
+    local _xinvsymmetric, _xinvdiagonal, _xinvcorrelation;
+    if _condcovsigtrunc==0;
+       _condcov=0; _xinvsymmetric = 1; _xinvdiagonal=0; _xinvcorrelation=1;                             
+    else;
+       _condcov=1; _xinvsymmetric = 1; _xinvdiagonal=0; _xinvcorrelation=0;  
+    endif;
+    { gY,gD1 } = gcondcov(eye(dim1),X, _condcov);   
+    
+    local _x1symmetric, _x2symmetric, _x1diagonal, _x2diagonal, _x2correlation;
+    _x2symmetric=1; _x2diagonal=0; _x1symmetric=1; _x1diagonal=0; _x2correlation = 0;
+    { ginvx11,gbomega } = gbothxomegax(invX11,sigtrunc, _x1symmetric, _x2symmetric, _x1diagonal, _x2diagonal, _x2correlation);
+
+    gBpsi11= ginverse(x11, _xinvsymmetric, _xinvdiagonal, _xinvcorrelation)*ginvx11; 
+    _x2symmetric=1; _x2diagonal=0; _x1symmetric=0; _x1diagonal=0; _x2correlation = 0;
+
+    { gpsi12,gB } = gbothxomegax(X12,B, _x1symmetric, _x2symmetric, _x1diagonal, _x2diagonal, _x2correlation);
+    gpsi11 = gBpsi11*gB;
+    gomega = gbomega*gB;
+    gsigtildenew = gsigtrunc*gomega;
+    
+    gMU = gsigtildenew[1:dimdiff,.]|zeros(dim1,cols(gsigtildenew));
+    gC = gsigtildenew[rows(gsigtildenew)-dimdiff+1:rows(gsigtildenew),.];
+    
+    indic1 = vectranspose(dim1,dimdiff);
+    gpsi12 = submat(gpsi12,indic1,0);
+    gpsi22 = zeros(rows(gd1),cols(gd1));
+    if _condcov;
+       gpsi11 = gpsi11+gsigtildenew[dimdiff+1:rows(gsigtildenew)-dimdiff,.];        
+       indic2 = matdup(seqa(1,1,ddcov))~(reshape((seqa(ddcov+1,1,dimdiff*dim1)),dimdiff,dim1));
+       indic3 = zeros(dim1,dimdiff)~matdup(seqa(ddcov+dimdiff*dim1+1,1,dd1cov));
+       indic = vecdup(indic2|indic3);
+       ggX = gD1+submat((gpsi11|gpsi12|gpsi22),indic,0);
+    elseif _condcov==0;
+       if dimdiff==2;
+          gpsi11 = gpsi11+gsigtildenew[dimdiff+2,.];
+       endif;
+       if ddcor == 0;
+         indic2 = 0~(reshape((seqa(ddcor+1,1,dimdiff*dim1)),dimdiff,dim1));
+       else;
+         indic2 = matndupdiagzero(seqa(1,1,ddcor))~(reshape((seqa(ddcor+1,1,dimdiff*dim1)),dimdiff,dim1));
+       endif;
+       if dd1cor==0;
+         indic3 = zeros(dim1,dimdiff)~0;
+       else;
+         indic3 = zeros(dim1,dimdiff)~matndupdiagzero(seqa(ddcor+dimdiff*dim1+1,1,dd1cor));
+       endif;
+       indic = vecndup(indic2|indic3); 
+       if ddcor==0 and dd1cor==0;
+           ggX=gD1+gpsi12;
+       elseif ddcor==0 and dd1cor!=0;
+           ggX = gD1+(gpsi12|zeros(dd1cor,dd1cov));
+       elseif ddcor!=0 and dd1cor==0;
+           ggX = gD1+submat((gpsi11|gpsi12),indic,0);
+       else;
+           ggX = gD1+submat((gpsi11|gpsi12|gpsi22),indic,0);
+       endif;           
+    endif;
+    retp(gmu,ggX,gC);
+endp;  
+
+proc(2) = gradunivariatenormaltrunc(muuntrunc,siguntrunc,trpoint);
+  local sig,w,lam,mutrunc,sigtrunc,dlamdw,dsigtemp2,dmutrunc,dsigtemp,dsigtemp1,dsigtruncdw,dsigtrunc; 
+  sig = sqrt(siguntrunc);
+  w = (trpoint-muuntrunc)./sig;
+  lam = (-pdfn(w))./cdfn(w);
+  mutrunc = muuntrunc+(sig.*lam);
+  sigtrunc = siguntrunc.*(1+(lam.*(w-lam)));
+  dlamdw = lam.*(lam-w);
+  dmutrunc = ((1-dlamdw)')|((((lam-dlamdw.*w)./(2*sig))'))|((dlamdw)');
+  dsigtemp = dlamdw.*(w-2*lam);
+  dsigtruncdw = (sig^2).*(lam+dsigtemp);
+  dsigtemp1 = (1/sig).*dsigtruncdw;
+  dsigtemp2 = 1+(lam.*(w-lam))-((w/2).*(lam+dsigtemp));
+  dsigtrunc = ((-dsigtemp1)')|(dsigtemp2')|(dsigtemp1');     
+  retp(dmutrunc,dsigtrunc);  
+endp;
+
+proc (2) = gcondcov(Y,X, _condcov);
+ local dim1,dim2,dimdiff,X11,X12,X22,invX11,gg2new,X22condcov,ggY,gg2,gg22,gg23,gg22new,ggX,indic1,indic2,indic3,indic,ddcov,ddcor,dd1cov,dd1cor;
+    dim1 = rows(Y);
+    dim2 = rows(X);
+    dimdiff = dim2-dim1;
+    ddcov = (dimdiff*(dimdiff+1))/2;   /* These next four lines are to get a way of sequencing the gradients later to put in the right order of elements in matrix X */
+    ddcor = (dimdiff*(dimdiff-1))/2;
+    dd1cov = (dim1*(dim1+1))/2;
+    dd1cor = (dim1*(dim1-1))/2;
+    X11 = X[1:dimdiff,1:dimdiff];
+    X12 = X[dimdiff+1:rows(X),1:dimdiff];
+    X22 = X[dimdiff+1:rows(X),dimdiff+1:rows(X)];
+    invX11 = invpd(X11);
+    X22condcov = X22-X12*invX11*X12';
+    
+    local _x1symmetric, _x2symmetric, _x1diagonal, _x2diagonal, _x2correlation;
+    _x2symmetric=1; _x2diagonal=0; _x1symmetric=1; _x1diagonal=1 ; _x2correlation=0;
+    { ggY,gg2 } = gbothxomegax(Y,X22condcov, _x1symmetric, _x2symmetric, _x1diagonal, _x2diagonal, _x2correlation);
+     _x2symmetric=1; _x2diagonal=0; _x1symmetric=0; _x1diagonal=0; _x2correlation=0;
+    { gg22,gg23 } = gbothxomegax(X12,invX11, _x1symmetric, _x2symmetric, _x1diagonal, _x2diagonal, _x2correlation);
+     gg22 =-gg22*gg2;
+     indic1 = vectranspose(dim1,dimdiff);
+     gg22new = submat(gg22,indic1,0);
+     
+     local _xinvsymmetric, _xinvdiagonal, _xinvcorrelation;
+     if _condcov;
+         _xinvsymmetric=1; _xinvdiagonal=0; _xinvcorrelation=0;
+         indic2 = matdup(seqa(1,1,ddcov))~(reshape((seqa(ddcov+1,1,dimdiff*dim1)),dimdiff,dim1));
+         indic3 = zeros(dim1,dimdiff)~matdup(seqa(ddcov+dimdiff*dim1+1,1,dd1cov));
+         indic = vecdup(indic2|indic3);
+         gg23 = -ginverse(X11, _xinvsymmetric, _xinvdiagonal, _xinvcorrelation)*gg23*gg2;
+         ggX = submat((gg23|gg22new|gg2),indic,0);
+     elseif _condcov==0;
+         _xinvsymmetric=1; _xinvdiagonal=0; _xinvcorrelation=1;
+       if ddcor == 0;
+           indic2 = 0~(reshape((seqa(ddcor+1,1,dimdiff*dim1)),dimdiff,dim1));
+       else;
+           indic2 = matndupdiagzero(seqa(1,1,ddcor))~(reshape((seqa(ddcor+1,1,dimdiff*dim1)),dimdiff,dim1));
+       endif;
+       if dd1cor==0;
+           indic3 = zeros(dim1,dimdiff)~0;
+       else;
+           indic3 = zeros(dim1,dimdiff)~matndupdiagzero(seqa(ddcor+dimdiff*dim1+1,1,dd1cor));
+       endif;
+ 
+         indic = vecndup(indic2|indic3);       
+         gg2new = delif(gg2,vecdup(eye(dim1)));
+         gg23 = -ginverse(X11, _xinvsymmetric, _xinvdiagonal, _xinvcorrelation)*gg23*gg2;
+
+         if ddcor==0 and dd1cor==0;
+             ggX=gg22new;
+         elseif ddcor==0 and dd1cor!=0;
+             ggX = gg22new|gg2new;
+         elseif ddcor!=0 and dd1cor==0;
+             ggX = submat((gg23|gg2new),indic,0);
+         else;
+             ggX = submat((gg23|gg22new|gg2new),indic,0);
+         endif;    
+     endif;
+
+     retp(ggY,ggX);
+endp;
+
+proc (2) = gbothxomegax(x1,x2, _x1symmetric, _x2symmetric, _x1diagonal, _x2diagonal, _x2correlation);
+    local n,k,temp,t1,gx1cov,gx2cov,temp1,tempSelMatrix;
+    n = rows(x1);
+    k = cols(x1);
+    temp = x2'*x1';    
+    t1={};
+    for i(1,n,1);
+      t1 = t1~(eye(n).*.temp[.,i]);
+    endfor;
+    gx1cov = (eye(n).*.(x2*x1'))+t1;
+    gx2cov = x1'.*.x1';      
+    if _x2symmetric;
+        tempSelMatrix = upmat(ones(n,n));
+        tempSelMatrix = (reshape(tempSelMatrix,1,n^2))';  /* tempselmatrix is because x'.*.x' gives derivatives including a12 and a21, a13                                                           and a31 etc., but should focus on only one since a12=a21 and a13=a31; tempsel deletes lower triangular elements of A */
+        gx1cov = (selif(gx1cov',tempSelMatrix))';
+        gx2cov = gasymtosym(gx2cov);
+        tempselmatrix = vecdup(eye(k));
+        if _x1symmetric;
+           temp1 = vecsymmetry(n); 
+           gx1cov=temp1*gx1cov;
+        endif;
+        if _x2diagonal==0;
+           if _x1diagonal;
+               gx1cov = selif(gx1cov,tempselmatrix);
+           endif;    
+        elseif _x2diagonal;
+           gx2cov = selif(gx2cov,tempselmatrix);
+           if _x1diagonal;
+              gx1cov = selif(gx1cov,tempSelMatrix);
+              gx1cov = (selif(gx1cov',tempSelMatrix))';               
+              gx2cov = (selif(gx2cov',tempSelMatrix))'; 
+           endif;
+        endif;
+        if _x2correlation and _x2diagonal;
+            gx2cov=0;
+        elseif _x2correlation and _x2diagonal==0;
+            gx2cov=delif(gx2cov,tempselmatrix);
+        endif;
+    endif;
+    retp(gx1cov,gx2cov);
+endp;
+
+proc (3) = gradnoncdfbvnbycdfn(mu,cov,x);
+    local om,sqrtom,kk1,kk2,rho,gw1,gw2,grho,gbcorcov,gomegacorcov,gcov,gmu,gx;
+    om = diag(cov);
+    sqrtom = sqrt(om);
+    kk1 = (x-mu)./sqrtom;
+    kk2 = corrvc(cov);  
+    /* This next line is needed because some diagonal elements of kk2 computed above are slightly greater than 1 because of the algebra in computing
+       correlations from corrvc, so ensuring that diagonal elements are no more than 1 */
+    kk2 = diagrv(kk2,ones(2,1));     
+    rho = kk2[1,2];
+    { gw1,gw2,grho } = gradcdfbvnbycdfn(kk1[1],kk1[2],rho); 
+    { gBcorcov,gomegacorcov } = gradcorcov(kk1,sqrtom,kk2);
+    gmu = -(gw1|gw2)./sqrtom;
+    gcov = gbcorcov*(gw1|gw2)+gomegacorcov*grho;
+    gx = -gmu;
+    retp(gmu,gcov,gx);
+endp;
+
+proc (3) = gradcdfbvnbycdfn(w1,w2,rho);
+    local gw1,gw2,gw1new,bivarcdf,univarcdf,grho;
+    bivarcdf = cdfbvn(w1,w2,rho);
+    univarcdf = cdfn(w1);
+    { gw1,gw2,grho }  = gradcdfbvn(w1,w2,rho);
+    gw1new = (univarcdf.*gw1-bivarcdf.*pdfn(w1))./(univarcdf^2);
+    retp(gw1new,gw2./univarcdf,grho./univarcdf);
+endp;   
+
+proc(2) = gradcorcov(C,litomega,omegastar);
+    local grm_lcl, grc_lcl, dim_lcl, temp, nuomega_lcl,row_lcl, col_lcl, cc1_lcl, l_lcl, mm, ndiag1, nhor1, nhor2, j,c1,k,l;
+    local nu1_lcl,nu2_lcl;
+
+    dim_lcl = rows(litomega);
+    row_lcl = dim_lcl*(dim_lcl+1)/2;
+    col_lcl = dim_lcl*(dim_lcl-1)/2;
+
+    nu1_lcl=litomega^2;
+    nu2_lcl=litomega;
+    temp = diagrv(zeros(dim_lcl,dim_lcl),litomega);
+    nuomega_lcl = temp*omegastar*temp;
+
+    grm_lcl = zeros(row_lcl,dim_lcl);
+    cc1_lcl=0.5*((C)./(nu1_lcl));
+    l_lcl = 0;
+    for idimvn (1,dim_lcl,1);
+        grm_lcl[l_lcl+1,idimvn]=cc1_lcl[idimvn];
+        l_lcl = l_lcl + (dim_lcl+1-idimvn);
+    endfor;
+
+    grc_lcl = zeros(row_lcl,col_lcl);
+    j=1;        mm = 1;        c1=1;
+    do until j== row_lcl;  
+        ndiag1 = 1./(nu2_lcl[mm]*nu2_lcl[mm+1:dim_lcl]);
+        ndiag1 = diagrv(eye(dim_lcl-mm),ndiag1);
+        nhor1 = (-0.5)*(omegastar[mm,mm+1:dim_lcl]./nuomega_lcl[mm,mm]);
+        nhor2 = (-0.5)*(omegastar[mm,mm+1:dim_lcl]./((nu1_lcl[mm+1:dim_lcl])'));
+        grc_lcl[j+1:j+dim_lcl-mm,c1:c1+dim_lcl-mm-1]=ndiag1;
+        grc_lcl[j,c1:c1+dim_lcl-1-mm]=nhor1;
+        k=j;            l=1;
+        do until l==dim_lcl+1-mm;
+            grc_lcl[k+dim_lcl+2-l-mm,l+c1-1]=nhor2[l];
+            k=k+dim_lcl+2-l-mm;
+            l=l+1;
+        endo;
+        c1=c1+dim_lcl-mm;            j = j+dim_lcl+1-mm;            mm=mm+1;
+    endo;
+    retp(-grm_lcl,grc_lcl);   /* Note that you need a negative in the first returned term; be careful with this  */
+endp;
+
+proc (3) = gradcdfbvn(w1,w2,rho);
+   local rhotilde,tr1,tr2,pdf2,gw1,gw2,grho;
+   rhotilde = sqrt((1-rho^2));
+   tr1 = (w2-rho.*w1)./rhotilde; 
+   tr2 = (w1-rho.*w2)./rhotilde;
+   pdf2 = (1/rhotilde).*(pdfn(w1).*pdfn(tr1));
+   gw1 = pdfn(w1).*cdfn(tr1);
+   gw2 = pdfn(w2).*cdfn(tr2);
+   grho = pdf2;
+   retp(gw1,gw2,grho);
+endp;   
+
+proc ginverse(x, _xinvsymmetric, _xinvdiagonal, _xinvcorrelation);
+    local k,g1,tempSelMatrix;
+    k = rows(x);
+    if _xinvsymmetric==0;
+       g1 = -inv((x')).*.inv(x);  
+    elseif _xinvsymmetric==1;
+       tempselmatrix = vecdup(eye(k));
+       g1 = -invpd((x')).*.invpd(x);
+       g1 = gasymtosym(g1);
+       if _xinvdiagonal==1;
+          g1 = selif(g1,tempselmatrix);
+          g1 = ((selif(g1',tempselmatrix))');
+       endif;       
+       if _xinvcorrelation and _xinvdiagonal==0;
+           g1=delif(g1,tempselmatrix);
+       endif;
+       if _xinvcorrelation and _xinvdiagonal;
+           g1=0;           
+       endif;
+    endif;
+    retp(g1);
+endp; 
+
+Proc gasymtosym(x);
+    local k,n,temp1,tempSelMatrix,newx,gsym;
+    k = sqrt(rows(x));
+    n = sqrt(cols(x));
+    temp1 = vecsymmetry(k);    
+    tempSelMatrix = upmat(ones(n,n));
+    tempSelMatrix = (reshape(tempSelMatrix,1,n^2))';  /* tempselmatrix is because x'.*.x' gives derivatives including a12 and a21, a13 
+                                                                  and a31 etc., but should focus on only one since a12=a21 and a13=a31; tempsel deletes lower triangular elements of A */
+    newx = (selif(x',tempSelMatrix))';
+    gsym = temp1*newx;
+    retp(gsym);
+endp;
+
+Proc vecsymmetry(r); 
+    local c,j,temp,temp1;
+    temp1={};
+    for c (1,r,1);
+       for j (c,r,1);
+           temp = zeros(r,r);
+           temp[c,j]=1;            temp[j,c]=1;
+           temp1 = temp1|reshape(temp,1,r*r);     /* temp1 is mechanism to add gradients of symmetric elements and get derivatives with respect to only upper triangular elements of CAPOMEGA */         
+       endfor;
+    endfor;
+    retp(temp1);
+endp;
+
+proc vecdup(r);
+    local h,c;
+    if cols(r) ne rows(r);
+        print "error: rows and columns not equal";
+    endif;
+    h = {};
+    c=1;
+    do until c >cols(r);
+      h = h~r[c,c:cols(r)];
+      c=c+1;
+    endo; 
+    retp(h');
+endp;
+
+Proc vectranspose(r,c); 
+    local c1,c2,c3;
+    c1 = seqa(1,1,r*c);
+    c2 = reshape (c1,r,c);
+    c3 = vecr((c2'));
+    retp(c3);
+endp;
+
+proc matdup(r);
+  local p,i,j,L,c,sk;
+  p = (-1+(1+8*rows(r))^0.5)/2;
+  if (p*(p+1)/2) != rows(r);
+    print "error in input vector";
+    STOP;
+  else; 
+    L = zeros(p, p);
+    c = 1;
+    sk=1;
+    do until c>p;
+      L[c,c:p] = (r[sk:sk+p-c])';
+      sk=sk+p-c+1;
+      c=c+1;
+    endo; 
+    retp(L);
+  endif;
+endp;
+
+proc vecndup(r);
+    local h,c;
+    if cols(r) ne rows(r);
+        print "error: rows and columns not equal";
+    endif;
+    h = {};
+    c=1;
+    do until c >cols(r)-1;
+      h = h~r[c,c+1:cols(r)];
+      c=c+1;
+    endo; 
+    retp(h');
+endp;
+
+proc matndupdiagzero(r);
+  local p,i,j,L,c,sk;
+  p = (1+(1+8*rows(r))^0.5)/2;
+  if (p*(p-1)/2) != rows(r);
+    print "error in input vector";
+    STOP;
+  else;
+    L = zeros(p, p);
+    c=1;
+    sk=1;
+    do until c==p;
+       L[c,c+1:p] = (r[sk:sk+p-c-1])';
+       sk=sk+p-c;
+       c=c+1;
+     endo;       
+
+  endif;  
+  retp(L);
+endp;
+
+proc (2) = gradbivariatenormaltrunc(muuntrunc,cov,trpoint);
+  local m,newtrpoint,cor,newtrpointrev,diagcovroot,diag1,rho,rhotilde,trpointrev,tr1,tr2,pd1,pd2,cd1,cd2,mu,sig,sig12,q2,P,omg; 
+  local  dmuderiv,dmutilde1da1,dmutilde1da2,dmutilde1sig1sq,dmutildedrho,dmutilde1dsig1sq,dmutildedsig12,dmutilde1dsig2sq,
+         dmutilde1dtr1,dmutilde1dtr2,dmutilde1dw1,dmutilde1dw2,dsigtilde,dsigtilde12dw1,dsigtilde12dw2,dsigtilde12drho;
+  local sigorig,sigoriginv,sigoriginvrev,rhotilde2,trcomp,del1,del2,pdf2,trcomprev,dmutilde1dsig1,dmutilde1dsig2;
+  local dsigtilde1dw1,dsigtilde1dw2,dsigtildedrho,domgderiv,domg1da1,domg1da2,domg1s1,domg1s12,domg1s2,domg1dtr1,domg1dtr2;
+  local domg12dtr,domg12da,sigorigsq,domg12s1,dmuderiv1,dmuderiv2,domg12s12,domgderiv11,domgderiv12,domgderiv22;
+    
+  m = rows(trpoint); 
+  sigorig = sqrt(diag(cov));
+  sigorigsq = sigorig^2;
+  sigoriginv = 1/sigorig;
+  sigoriginvrev = rev(sigoriginv);
+  newtrpoint = (trpoint-muuntrunc)./sigorig;   
+  cor = corrvc(cov);
+  rho = cor[1,2];
+  P = cdfbvn(newtrpoint[1],newtrpoint[2],rho);
+  newtrpointrev = rev(newtrpoint);
+  rhotilde = sqrt((1-rho^2));
+  rhotilde2 = rhotilde^2;
+  tr1 = (newtrpoint-rho*newtrpointrev)/rhotilde;
+  tr2 = rev(tr1);
+  trcomp = rho*newtrpoint-newtrpointrev;
+  trcomprev = rev(trcomp);
+  pd1 = pdfn(newtrpoint);
+  pd2 = rev(pd1);
+  cd1 = cdfn(tr1);
+  cd2 = rev(cd1);
+  del1 = pd1.*cd2;
+  del2 = pd2.*cd1;
+  pdf2 = (1/rhotilde)*(pd1[1]*pdfn(tr1[2]));
+  mu = (-rho*del2-del1)/P;
+
+  dmutilde1dw1=(1/P)*sigorig.*((newtrpoint.*del1)+(del1.*(-mu)));
+  dmutilde1dw2 = (1/P)*(-sigorig).*(rhotilde2*pdf2+(mu-rho*(newtrpointrev)).*(del2));
+  dmutildedrho = (1/P)*(-sigorig).*(del2+pdf2.*(mu-newtrpoint));
+  dmutilde1da1 = 1-(sigoriginv).*dmutilde1dw1;
+  dmutilde1da2 = -(sigoriginvrev).*dmutilde1dw2;
+  dmutilde1dsig1 = -(sigoriginv.*(newtrpoint).*dmutilde1dw1-mu+rho*sigoriginv.*dmutildedrho);
+  dmutilde1dsig2 = -(sigoriginvrev.*(newtrpointrev).*dmutilde1dw2+rho*sigoriginvrev.*dmutildedrho);
+  dmutilde1dsig1sq=0.5*(sigoriginv).*dmutilde1dsig1;
+  dmutilde1dsig2sq=0.5*(sigoriginvrev).*dmutilde1dsig2;  
+  dmutildedsig12 = (prodc(sigoriginv)).*dmutildedrho; 
+  dmutilde1dtr1 = (sigoriginv).*dmutilde1dw1;
+  dmutilde1dtr2 = (sigoriginvrev).*dmutilde1dw2;
+
+  dmuderiv1 = dmutilde1da1[1]|dmutilde1da2[1]|dmutilde1dsig1sq[1]|dmutildedsig12[1]|dmutilde1dsig2sq[1]|dmutilde1dtr1[1]|dmutilde1dtr2[1];
+  dmuderiv2 = dmutilde1da2[2]|dmutilde1da1[2]|dmutilde1dsig2sq[2]|dmutildedsig12[2]|dmutilde1dsig1sq[2]|dmutilde1dtr2[2]|dmutilde1dtr1[2];  
+  dmuderiv = dmuderiv1~dmuderiv2;
+
+  
+  sig = ((P-(newtrpoint.*pd1.*cd2)-((rho^2)*newtrpointrev.*pd2.*cd1)+(rhotilde*rho*pd2.*pdfn(tr1)))/P)-mu^2;
+  sig12 = ((rho*P-rho*newtrpoint[1]*pd1[1]*cd2[1]+rhotilde*pd1[1]*pdfn(tr2[1])-rho*newtrpointrev[1]*pd2[1]*cd1[1])/p)-prodc(mu);
+  diagcovroot = sqrt(diag(cov));
+  diag1 = diagrv(zeros(m,m),diagcovroot);
+ 
+ 
+  dsigtilde1dw1 = -(del1/P).*((-newtrpoint^2)+sig+mu^2)-2*mu.*(dmutilde1dw1./sigorig);
+  dsigtilde1dw2 = -(1/P)*((rhotilde2*(rho*pdf2*newtrpointrev+newtrpoint*pdf2-del2))-(rho^2)*(newtrpointrev^2).*del2+(sig+mu^2).*del2)-2*mu.*(dmutilde1dw2./sigorig);
+  dsigtildedrho = -(1/P)*(pdf2*(-newtrpoint^2)+2*rho*newtrpointrev.*del2-2*pdf2*rhotilde2+((sig+mu^2)*pdf2))-2*mu.*(dmutildedrho./sigorig);
+  dsigtilde = (1/P)*((rho*newtrpoint).*(rho*pdf2+newtrpoint.*del1)-pdf2*newtrpoint-del1*(sig12+prodc(mu)));
+  dsigtilde12dw1 = dsigtilde[1]-(sumc((mu.*((dmutilde1dw2[2]|dmutilde1dw1[1])./(rev(sigorig)))))); 
+  dsigtilde12dw2 = dsigtilde[2]-(sumc((mu.*((dmutilde1dw1[2]|dmutilde1dw2[1])./(rev(sigorig))))));    
+  dsigtilde12drho = 1-(1/P)*((-prodc(newtrpoint))*pdf2+(sumc((newtrpoint.*del1)))+(prodc(mu)+sig12)*pdf2);  
+  dsigtilde12drho = dsigtilde12drho-sumc((mu.*(rev(dmutildedrho)).*(sigoriginvrev))); 
+  
+  domg1dtr1 = (sigorig).*dsigtilde1dw1;
+  domg12dtr = (rev(sigorig)).*(dsigtilde12dw1|dsigtilde12dw2);
+  domg1dtr2 = ((sigorig)^2).*sigoriginvrev.*dsigtilde1dw2;
+  domg1da1 = - domg1dtr1;
+  domg12da=-domg12dtr;
+  domg1da2 = - domg1dtr2;
+  domg1s1 = sig+dsigtilde1dw1.*(newtrpoint).*(-0.5)+dsigtildedrho.*rho*(-0.5);
+  domg1s12 = (sigorig./(rev(sigorig))).*dsigtildedrho;
+  domg1s2 = (-0.5)*(sigorigsq.*(1/rev(sigorigsq))).*(dsigtilde1dw2.*newtrpointrev+dsigtildedrho*rho);
+  domg12s1 = (0.5)*(rev(sigorig)./sigorig).*(sig12-newtrpoint.*(dsigtilde12dw1|dsigtilde12dw2)-rho*dsigtilde12drho);  
+  domg12s12 = dsigtilde12drho;
+
+  domgderiv11 = domg1da1[1]|domg1da2[1]|domg1s1[1]|domg1s12[1]|domg1s2[1]|domg1dtr1[1]|domg1dtr2[1];
+  domgderiv12 = (domg12da)|domg12s1[1]|domg12s12|domg12s1[2]|(domg12dtr);
+  domgderiv22 = domg1da2[2]|domg1da1[2]|domg1s2[2]|domg1s12[2]|domg1s1[2]|domg1dtr2[2]|domg1dtr1[2];
+  domgderiv = domgderiv11~domgderiv12~domgderiv22;
+  retp(dmuderiv,domgderiv);
+endp;  
+
+proc (2) = bivariatenormaltrunc(muuntrunc,cov,trpoint);
+  local m,newtrpoint,cor,newtrpointrev,diagcovroot,diag1,rho,rhotilde,trpointrev,tr1,tr2,pd1,pd2,cd1,cd2,mu,sig,sig12,q2,P,omg;  
+  m = rows(trpoint); 
+  newtrpoint = (trpoint-muuntrunc)./(sqrt(diag(cov)));   
+  cor = corrvc(cov);
+  rho = cor[1,2];
+  P = cdfbvn(newtrpoint[1],newtrpoint[2],rho);
+  newtrpointrev = rev(newtrpoint);
+  rhotilde = sqrt((1-rho^2));
+  tr1 = (newtrpoint-rho*newtrpointrev)/rhotilde;
+  tr2 = rev(tr1);
+  pd1 = pdfn(newtrpoint);
+  pd2 = rev(pd1);
+  cd1 = cdfn(tr1);
+  cd2 = rev(cd1);
+  mu = (-(rho*pd2).*cd1-pd1.*cd2)/P; 
+  sig = ((P-(newtrpoint.*pd1.*cd2)-((rho^2)*newtrpointrev.*pd2.*cd1)+(rhotilde*rho*pd2.*pdfn(tr1)))/P)-mu^2;
+  sig12 = ((rho*P-rho*newtrpoint[1]*pd1[1]*cd2[1]+rhotilde*pd1[1]*pdfn(tr2[1])-rho*newtrpointrev[1]*pd2[1]*cd1[1])/p)-prodc(mu);
+  diagcovroot = sqrt(diag(cov));
+  diag1 = diagrv(zeros(m,m),diagcovroot);
+  mu = muuntrunc+(diagcovroot.*mu);  
+  omg = zeros(2,2);
+  omg[1,2] = sig12;
+  omg[2,1]=sig12;
+  omg = diagrv(omg,sig);  
+  omg = diag1*omg*diag1;  
+  retp(mu,omg);
+endp; 
+
+proc matndupdiagzerofull(r);
+  local p,i,j,L,c,sk;
+  p = (1+(1+8*rows(r))^0.5)/2;
+  if (p*(p-1)/2) != rows(r);
+    print "error in input vector";
+    STOP;
+  else;
+    L = zeros(p, p);
+    c=1;
+    sk=1;
+    do until c==p;
+       L[c,c+1:p] = (r[sk:sk+p-c-1])';
+       sk=sk+p-c;
+       c=c+1;
+     endo;       
+  endif;  
+  retp(L+L');
+endp;
+
+proc (1) = cdfmvnaT(mu,cov,x);
+    if rows(mu) == 1 and cols(mu) == 1;
+        retp(noncdfn(mu, cov, x));
+    endif;
+    local om,sqrtom,kk1,kk2,P,s1;
+    om = diag(cov);
+    sqrtom = sqrt(om);
+    kk1 = (x-mu)./sqrtom;
+    /* This next line is needed, because truncated values go bizarre if truncation happens on abscissa less than -5.8 */
+    kk1 = -5.8*(kk1 .<-5.8)+kk1.*(kk1.>=-5.8);      
+    kk2 = corrvc(cov);  
+    /* This next line is needed because some diagonal elements of kk2 computed above are slightly greater than 1 because of the algebra in computing
+       correlations from corrvc, so ensuring that diagonal elements are no more than 1 */
+    kk2 = diagrv(kk2,ones(rows(kk1),1));   
+    P = cdfmvnaOVUS(kk1',kk2);
+    retp(P);        
+endp;  
+
+proc (1) = cdfmvnastd(mu, cov, x);
+    if rows(mu) == 1 and cols(mu) == 1;
+    retp(noncdfn(mu, cov, x));
+    endif;
+    local om,sqrtom,kk1,kk2,P,s1;
+    om = diag(cov);
+    sqrtom = sqrt(om);
+    kk1 = (x-mu)./sqrtom;
+    /* This next line is needed, because truncated values go bizarre if truncation happens on abscissa less than -5.8 */
+    kk1 = -5.8*(kk1 .<-5.8)+kk1.*(kk1.>=-5.8);      
+    kk2 = corrvc(cov);  
+    /* This next line is needed because some diagonal elements of kk2 computed above are slightly greater than 1 because of the algebra in computing
+       correlations from corrvc, so ensuring that diagonal elements are no more than 1 */
+    kk2 = diagrv(kk2,ones(rows(kk1),1));   
+    P = cdfmvn(kk1,kk2);
+    retp(P); 
+endp;
+
+proc (4) = pdfmvnaT(mu,cov,x);
+    
+    if rows(mu) == 1 and cols(mu) == 1;
+        local g1, g2, g3;
+        {g1, g2, g3} = gradnoncdfn(mu, cov, x);
+        retp(noncdfn(mu, cov, x), g1, g2, g3);
+    endif;
+    
+    local om,sqrtom,kk1,kk2,rho,gw,p,grho,gbcorcov,gomegacorcov,gcov,gmu,gx,s1;
+    om = diag(cov);
+    sqrtom = sqrt(om);
+    kk1 = (x-mu)./sqrtom;
+    /* This next line is needed, because truncated values go bizarre if truncation happens on abscissa less than -6 */
+    kk1 = -5.8*(kk1 .<-5.8)+kk1.*(kk1.>=-5.8);     
+    kk2 = corrvc(cov);  
+    /* This next line is needed because some diagonal elements of kk2 computed above are slightly greater than 1 because of the algebra in computing
+       correlations from corrvc, so ensuring that diagonal elements are no more than 1 */
+    kk2 = diagrv(kk2,ones(rows(kk1),1));      
+    { p,gw,grho } = pdfmvnaOVUS(kk1',kk2); 
+    { gBcorcov,gomegacorcov } = gradcorcov(kk1,sqrtom,kk2);
+    gcov = gbcorcov*(gw)+gomegacorcov*grho;
+    gmu = -(gw)./sqrtom;
+    gx = -gmu;    
+retp(p,gmu,gcov,gx);    
+endp;
+
+proc (1) = noncdfn(mu,sig,x);
+    local w;
+    w = (x-mu)./(sqrt(sig));
+    retp(cdfn(w));
+endp;  
+
+proc (3) = gradnoncdfn(mu,sig2,x);
+   local invsig2,invsig,w;
+   invsig2 = 1/sig2;
+   invsig = sqrt(invsig2);
+   w = (x-mu).*invsig;
+   retp(-invsig.*pdfn(w),pdfn(w).*(-0.5*((invsig2).*w)),pdfn(w).*invsig);
+endp;
+
+proc gcholeskycov(capomega);
+    local dg,litomega,parmdim,parmcov,parmcor,omegastar_chol,omegastar_chol_diag,
+          mm,c,l,j,ss,ss1,m,xsig;   
+    litomega = sqrt(diag(capomega));
+    parmDim = rows(litomega);
+    parmCov = parmDim*(parmDim+1)/2;
+    omegastar_chol = chol(capomega);
+    omegastar_chol_diag = diag(omegastar_chol);   
+    dg = zeros(parmcov,parmcov);
+    xsig = vecdup(omegastar_chol);
+    j=1;
+    mm = 1;
+    if parmDim>1;
+      do until j > parmcov;  
+        c=j;
+        l=1;
+        do until c> parmcov;
+            dg[j+l-1:j+parmdim-mm,c:c+parmdim-l+1-mm] = eye(parmdim-l+2-mm)*xsig[j+l-1];
+            dg[j+l-1,c:c+parmdim-l+1-mm] = dg[j+l-1,c:c+parmdim-l+1-mm]+(xsig[j+l-1:j+parmdim-mm])';
+            c=c+parmdim-l+1-mm+1;
+            l=l+1;
+        endo;
+        j = j+parmdim-mm+1;
+        mm=mm+1;
+      endo;
+    elseif parmDim==1;
+      dg=1; 
+    endif; 
+    retp(dg);
+endp;
