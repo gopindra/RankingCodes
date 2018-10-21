@@ -1,0 +1,670 @@
+// @author: Gopindra Sivakumar Nair (2018)
+
+/*
+Please cite,
+    Nair, G.S., Bhat, C.R., Pendyala, R.M., Loo, B.P.Y. and Lam, W.H.K., "On the Use of Probit Based Models for Ranking Data Analysis,"
+if using this code.
+*/
+
+#include rankingmodels.ext
+
+library cdfmvnaT, maxlik;
+maxset;
+
+/*
+Creates the mask matrix which when premultiplied to utility vector generates the vector 
+of differences in utilities that should be less than zero to generate the input ranking.
+ranks:       The vector of ranks given to alternatives 1, 2, 3, ....
+rank_depth:  The rank level up to which ranking is considered
+Eg:
+let ranks = 5 3 6 2 4 1;
+let rank_depth = 3;
+get_rank_mask(ranks, rank_depth);
+      0.00000000       0.00000000       0.00000000        1.0000000       0.00000000       -1.0000000 
+      0.00000000        1.0000000       0.00000000       -1.0000000       0.00000000       0.00000000 
+      0.00000000       -1.0000000       0.00000000       0.00000000        1.0000000       0.00000000 
+       1.0000000       -1.0000000       0.00000000       0.00000000       0.00000000       0.00000000 
+      0.00000000       -1.0000000        1.0000000       0.00000000       0.00000000       0.00000000 
+*/
+proc (1) = get_rank_mask(ranks, rank_depth);
+    local prefs, n_choices, better_choices, worse_choices, row_indices, M;
+    prefs = sortind(ranks);
+    n_choices = rows(ranks);
+    better_choices = ones(n_choices-1, 1) * prefs[rank_depth];
+    if rank_depth > 1;
+        better_choices[1:rank_depth-1] = prefs[1:rank_depth-1];
+    endif;
+    worse_choices = prefs[2:n_choices];
+    row_indices = seqa(1, 1, n_choices-1);
+    M = zeros(n_choices-1, n_choices);
+    M = putvals(M, row_indices~better_choices, -ones(n_choices-1, 1));
+    M = putvals(M, row_indices~worse_choices, ones(n_choices-1, 1));
+    retp(M);
+endp;
+
+/*
+Creates the mask matrix which when premultiplied to utility vector generates the vector 
+of differences in utilities that should be less than zero for the last ranked alternative 
+to have lowest utility.
+ranks:       The vector of ranks given to alternatives 1, 2, 3, ....
+Eg:
+let ranks = 5 3 6 2 4 1;
+get_rank_mask(ranks);
+      -1.0000000       0.00000000        1.0000000       0.00000000       0.00000000       0.00000000 
+      0.00000000       -1.0000000        1.0000000       0.00000000       0.00000000       0.00000000 
+      0.00000000       0.00000000        1.0000000       -1.0000000       0.00000000       0.00000000 
+      0.00000000       0.00000000        1.0000000       0.00000000       -1.0000000       0.00000000 
+      0.00000000       0.00000000        1.0000000       0.00000000       0.00000000       -1.0000000
+*/
+proc (1) = get_worst_mask(ranks);
+    local M, n_choices, worst_choice;
+    n_choices = rows(ranks);
+    worst_choice = maxindc(ranks);
+    M = -eye(n_choices);
+    M = delrows(M, worst_choice);
+    M[., worst_choice] = ones(rows(M), 1);
+    retp(M);
+endp;
+
+/*
+Log-likelihood function for Rank Ordered Probit model
+*/
+proc(1) = LL_ROP(params, dta, struct ranking_config config);
+    
+    if config.rank_scaling == 1;
+        retp(LL_HROP(params, dta, config));
+    endif;
+    
+    local beta_means;
+    beta_means = params[1:config.n_attr];
+    
+    local e_var2;
+    if config.error_unknown == 1;
+        local e_var_params, e_var_chol;
+        e_var_params = params[config.n_attr+1:config.n_attr+config.n_choices*(config.n_choices-1)/2];
+        e_var_chol = lowmat(xpnd(e_var_params));
+        e_var2 = zeros(config.n_choices, config.n_choices);
+        e_var2[2:config.n_choices, 2:config.n_choices] = e_var_chol*e_var_chol';
+    else;
+        e_var2 = config.e_var;
+    endif;
+    
+    local x, y, M, Mx, MU_mean, MU_var, lll, p;
+    lll = zeros(rows(dta), 1);
+
+    threadfor i(1, rows(dta), 1);
+        x = reshape(dta[i, config.utility_cols], config.n_choices, config.n_attr);
+        y = dta[i, config.dependent_cols];
+        M = get_rank_mask(y', config.rank_depth);
+        Mx = M*x;
+        MU_mean = Mx*beta_means;
+        MU_var = M * e_var2 * M';
+        p = cdfmvnaT(MU_mean, MU_var, MU_mean*0);
+        lll[i] = ln(p);
+    threadendfor;
+    retp(sumc(lll));
+endp;
+
+/*
+Gradient of LL_ROP with respect to params.
+*/    
+proc(1) = grad_LL_ROP(params, dta, struct ranking_config config);
+    
+    if config.rank_scaling == 1;
+        retp(grad_LL_HROP(params, dta, config));
+    endif;
+    
+    local e_var2;
+    if config.error_unknown == 1;
+        local e_var_params, e_var_chol;
+        e_var_params = params[config.n_attr+1:config.n_attr+config.n_choices*(config.n_choices-1)/2];
+        e_var_chol = lowmat(xpnd(e_var_params));
+        e_var2 = zeros(config.n_choices, config.n_choices);
+        e_var2[2:config.n_choices, 2:config.n_choices] = e_var_chol*e_var_chol';
+    else;
+        e_var2 = config.e_var;
+    endif;
+    
+    local beta_means;
+    beta_means = params[1:config.n_attr];
+    
+    local gradients;  
+    gradients = zeros(rows(dta), rows(params));
+    
+    local x, y, M, Mx, MU_mean, MU_var, lll;
+    local grad_mean, grad_var, grad_beta_mean, grad_e_var, grad_e_var_cholesky, grads;
+    threadfor i(1, rows(dta), 1);
+        x = reshape(dta[i, config.utility_cols], config.n_choices, config.n_attr);
+        y = dta[i, config.dependent_cols];
+        M = get_rank_mask(y', config.rank_depth);
+        Mx = M*x;
+        MU_mean = Mx*beta_means;
+        MU_var = M * e_var2 * M';      
+        {grad_mean, grad_var} = grad_lncdfmvnaT(MU_mean, MU_var);
+        grad_beta_mean = grad_Ax(Mx, grad_mean);
+        grads = grad_beta_mean';
+        if config.error_unknown == 1;
+            grad_e_var = grad_A_X_A(M, grad_var);
+            grad_e_var_cholesky = grad_cholesky(e_var2[2:config.n_choices, 2:config.n_choices], e_var_chol, grad_e_var[2:config.n_choices, 2:config.n_choices]);
+            grads = grads ~ vech(grad_e_var_cholesky)';
+        endif;
+        gradients[i,.] = grads;
+    threadendfor;
+    retp(gradients);
+endp;
+
+/*
+Log-likelihood function for Rank Ordered Logit model
+*/
+proc(1) = LL_ROL(params, dta, struct ranking_config config);
+    
+    local beta_means, fear_factor, x, y, prefs, U, p, lll;
+    lll = zeros(rows(dta), 1);
+    beta_means = params[1:config.n_attr];
+    
+    if config.rank_scaling == 1;
+        fear_factor = params[config.n_attr+1:config.n_attr+config.n_choices-2];
+        fear_factor = exp(fear_factor);
+    else;
+        fear_factor = ones(config.n_choices-2, 1);
+    endif;
+    
+    threadfor i(1, rows(dta), 1);
+        x = reshape(dta[i, config.utility_cols], config.n_choices, config.n_attr);
+        y = dta[i, config.dependent_cols]';
+        U = x*beta_means;
+        prefs = sortind(y);
+        p = 1;
+        for j(1, config.n_choices, 1);
+            if (j > config.rank_depth);
+                break;
+            endif;
+            if j == 1;
+                p = p * exp(U[prefs[j]])/sumc(exp(U[prefs[j:config.n_choices]]));
+            else;
+                p = p * exp(U[prefs[j]] * fear_factor[j-1])/sumc(exp(U[prefs[j:config.n_choices]] * fear_factor[j-1]));
+            endif;
+        endfor;
+        lll[i] = ln(p);
+    threadendfor;
+    retp(lll);
+    
+endp;
+
+/*
+Computes the likelihood of choice made at the rank level set in config.rank_depth.
+Utilities are like in Multinomial Probit model.
+So, if config.rank_depth = 3, this function gives the log-likelihood individuals choosing the 3rd
+ranked alternative among alternatives that are ranked 3rd and above
+*/
+proc(1) = LL_MNP_RL(params, dta, struct ranking_config config);
+    
+    local beta_means;
+    beta_means = params[1:config.n_attr];
+    
+    local e_var2;
+    if config.error_unknown == 1;
+        local e_var_params, e_var_chol;
+        e_var_params = params[config.n_attr+1:config.n_attr+config.n_choices*(config.n_choices-1)/2];
+        e_var_chol = lowmat(xpnd(e_var_params));
+        e_var2 = zeros(config.n_choices, config.n_choices);
+        e_var2[2:config.n_choices, 2:config.n_choices] = e_var_chol*e_var_chol';
+    else;
+        e_var2 = config.e_var;
+    endif;
+    
+    local x, y, M, Mx, MU_mean, MU_var, lll, p;
+    lll = zeros(rows(dta), 1);
+
+    threadfor i(1, rows(dta), 1);
+        x = reshape(dta[i, config.utility_cols], config.n_choices, config.n_attr);
+        y = dta[i, config.dependent_cols];
+        M = get_rank_mask(y', config.rank_depth);
+        M = M[config.rank_depth:config.n_choices-1, .];
+        Mx = M*x;
+        MU_mean = Mx*beta_means;
+        MU_var = M * e_var2 * M';
+        p = cdfmvnaT(MU_mean, MU_var, MU_mean*0);
+        lll[i] = ln(p);
+    threadendfor;
+    retp(lll);
+endp;
+
+/*
+Gradient of LL_MNP_RL with respect to params
+*/
+proc(1) = grad_LL_MNP_RL(params, dta, struct ranking_config config);
+    
+    local e_var2;
+    if config.error_unknown == 1;
+        local e_var_params, e_var_chol;
+        e_var_params = params[config.n_attr+1:config.n_attr+config.n_choices*(config.n_choices-1)/2];
+        e_var_chol = lowmat(xpnd(e_var_params));
+        e_var2 = zeros(config.n_choices, config.n_choices);
+        e_var2[2:config.n_choices, 2:config.n_choices] = e_var_chol*e_var_chol';
+    else;
+        e_var2 = config.e_var;
+    endif;
+    
+    local beta_means;
+    beta_means = params[1:config.n_attr];
+    
+    local gradients;  
+    gradients = zeros(rows(dta), rows(params));
+    
+    local x, y, M, Mx, MU_mean, MU_var, lll;
+    local grad_mean, grad_var, grad_beta_mean, grad_e_var, grad_e_var_cholesky, grads;
+    threadfor i(1, rows(dta), 1);
+        x = reshape(dta[i, config.utility_cols], config.n_choices, config.n_attr);
+        y = dta[i, config.dependent_cols];
+        M = get_rank_mask(y', config.rank_depth);
+        M = M[config.rank_depth:config.n_choices-1,.];
+        Mx = M*x;
+        MU_mean = Mx*beta_means;
+        MU_var = M * e_var2 * M';      
+        {grad_mean, grad_var} = grad_lncdfmvnaT(MU_mean, MU_var);
+        grad_beta_mean = grad_Ax(Mx, grad_mean);
+        grads = grad_beta_mean';
+        if config.error_unknown == 1;
+            grad_e_var = grad_A_X_A(M, grad_var);
+            grad_e_var_cholesky = grad_cholesky(e_var2[2:config.n_choices, 2:config.n_choices], e_var_chol, grad_e_var[2:config.n_choices, 2:config.n_choices]);
+            grads = grads ~ vech(grad_e_var_cholesky)';
+        endif;
+        gradients[i,.] = grads;
+    threadendfor;
+    retp(gradients);
+endp;
+
+/*
+Computes the likelihood of choice made at the rank level set in config.rank_depth.
+Utilities are like in Multinomial Logit model.
+So, if config.rank_depth = 3, this function gives the log-likelihood individuals choosing the 3rd
+ranked alternative among alternatives that are ranked 3rd and above
+*/
+proc(1) = LL_MNL_RL(params, dta, struct ranking_config config);
+    
+    local beta_means, fear_factor, x, y, prefs, U, p, lll;
+    lll = zeros(rows(dta), 1);
+    beta_means = params[1:config.n_attr];
+    
+    threadfor i(1, rows(dta), 1);
+        x = reshape(dta[i, config.utility_cols], config.n_choices, config.n_attr);
+        y = dta[i, config.dependent_cols]';
+        U = x*beta_means;
+        prefs = sortind(y);
+        p = exp(U[prefs[config.rank_depth]])/sumc(exp(U[prefs[config.rank_depth:config.n_choices]]));
+        lll[i] = ln(p);
+    threadendfor;
+    retp(sumc(lll));
+    
+endp;
+
+/*
+Computes the likelihood of the last ranked alternative being selected last.
+Utilities are like in Multinomial Logit model.
+*/
+proc(1) = LL_MNL_Last(params, dta, struct ranking_config config);
+    
+    local beta_means, x, y, prefs, U, p, lll, combos;
+    lll = zeros(rows(dta), 1);
+    beta_means = params[1:config.n_attr];
+    
+    threadfor i(1, rows(dta), 1);
+        x = reshape(dta[i, config.utility_cols], config.n_choices, config.n_attr);
+        y = dta[i, config.dependent_cols]';
+        U = x*beta_means;
+        prefs = sortind(y);
+        p = 1;
+        for j(1, config.n_choices-1, 1);
+            combos = combinate(config.n_choices-1, j);
+            for combo_i(1, rows(combos), 1);               
+                p = p + ((-1)^j) * exp(U[prefs[config.n_choices]]) / (exp(U[prefs[config.n_choices]]) + sumc(exp(U[prefs[combos[combo_i,.]]])));
+            endfor;
+        endfor;
+        lll[i] = ln(p);
+    threadendfor;
+    retp(sumc(lll));
+    
+endp;
+
+/*
+Computes the likelihood of the last ranked alternative being selected last.
+Utilities are like in Multinomial Probit model.
+*/
+proc(1) = LL_MNP_Last(params, dta, struct ranking_config config);
+    
+    local beta_means;
+    beta_means = params[1:config.n_attr];
+    
+    local e_var2;
+    if config.error_unknown == 1;
+        local e_var_params, e_var_chol;
+        e_var_params = params[config.n_attr+1:config.n_attr+config.n_choices*(config.n_choices-1)/2];
+        e_var_chol = lowmat(xpnd(e_var_params));
+        e_var2 = zeros(config.n_choices, config.n_choices);
+        e_var2[2:config.n_choices, 2:config.n_choices] = e_var_chol*e_var_chol';
+    else;
+        e_var2 = config.e_var;
+    endif;
+    
+    local x, y, M, Mx, MU_mean, MU_var, lll, p;
+    lll = zeros(rows(dta), 1);
+
+    threadfor i(1, rows(dta), 1);
+        x = reshape(dta[i, config.utility_cols], config.n_choices, config.n_attr);
+        y = dta[i, config.dependent_cols]';
+        M = get_worst_mask(y);
+        Mx = M*x;
+        MU_mean = Mx*beta_means;
+        MU_var = M * e_var2 * M';
+        p = cdfmvnaT(MU_mean, MU_var, MU_mean*0);
+        lll[i] = ln(p);
+    threadendfor;
+    retp(lll);
+    
+endp;
+
+/*
+Gradient of LL_MNP_Last with respect to params
+*/
+proc(1) = grad_LL_MNP_Last(params, dta, struct ranking_config config);
+    
+    local e_var2;
+    if config.error_unknown == 1;
+        local e_var_params, e_var_chol;
+        e_var_params = params[config.n_attr+1:config.n_attr+config.n_choices*(config.n_choices-1)/2];
+        e_var_chol = lowmat(xpnd(e_var_params));
+        e_var2 = zeros(config.n_choices, config.n_choices);
+        e_var2[2:config.n_choices, 2:config.n_choices] = e_var_chol*e_var_chol';
+    else;
+        e_var2 = config.e_var;
+    endif;
+    
+    local beta_means;
+    beta_means = params[1:config.n_attr];
+    
+    local gradients;  
+    gradients = zeros(rows(dta), rows(params));
+    
+    local x, y, M, Mx, MU_mean, MU_var, lll;
+    local grad_mean, grad_var, grad_beta_mean, grad_e_var, grad_e_var_cholesky, grads;
+    threadfor i(1, rows(dta), 1);
+        x = reshape(dta[i, config.utility_cols], config.n_choices, config.n_attr);
+        y = dta[i, config.dependent_cols]';
+        M = get_worst_mask(y);
+        Mx = M*x;
+        MU_mean = Mx*beta_means;
+        MU_var = M * e_var2 * M';      
+        {grad_mean, grad_var} = grad_lncdfmvnaT(MU_mean, MU_var);
+        grad_beta_mean = grad_Ax(Mx, grad_mean);
+        grads = grad_beta_mean';
+        if config.error_unknown == 1;
+            grad_e_var = grad_A_X_A(M, grad_var);
+            grad_e_var_cholesky = grad_cholesky(e_var2[2:config.n_choices, 2:config.n_choices], e_var_chol, grad_e_var[2:config.n_choices, 2:config.n_choices]);
+            grads = grads ~ vech(grad_e_var_cholesky)';
+        endif;
+        gradients[i,.] = grads;
+    threadendfor;
+    retp(gradients);
+    
+endp;
+
+/*
+Log-likelihood function for heteroskedastic rank ordered probit model
+*/
+proc(1) = LL_HROP(params, dta, struct ranking_config config);
+    local tlll, rank_scales;
+    struct ranking_config config2;
+    tlll = zeros(rows(dta), 1); 
+    rank_scales = params[config.n_attr+config.error_unknown*config.n_choices*(config.n_choices-1)/2+1:config.n_attr+config.error_unknown*config.n_choices*(config.n_choices-1)/2+config.n_choices-2];
+    rank_scales = 1|exp(rank_scales);
+    config2 = config;
+    config2.rank_scaling = 0;
+    for i(1, config.rank_depth, 1);
+        config2.rank_depth = i;
+        tlll[i] = tlll[i] + LL_ROP(params[1:rows(params)-config.n_choices+2] * rank_scales[i], dta, config2);
+        if i > 1;
+            config2.rank_depth = i-1;
+            tlll[i] = tlll[i] - LL_ROP(params[1:rows(params)-config.n_choices+2] * rank_scales[i], dta, config2);
+        endif;
+    endfor;
+    retp(tlll);
+endp;
+
+/*
+Gradient of LL_HROP with respect to params
+*/
+proc(1) = grad_LL_HROP(params, dta, struct ranking_config config);
+    local g, rank_scales, grad_coeffs, grad_rs;
+    struct ranking_config config2;    
+    grad_coeffs = zeros(rows(dta), config.n_attr);
+    grad_rs = zeros(rows(dta), config.n_choices-1);
+    rank_scales = params[config.n_attr+config.error_unknown*config.n_choices*(config.n_choices-1)/2+1:config.n_attr+config.error_unknown*config.n_choices*(config.n_choices-1)/2+config.n_choices-2];
+    rank_scales = 1|exp(rank_scales);
+    config2 = config;
+    config2.rank_scaling = 0;
+    for i(1, config.rank_depth, 1);
+        config2.rank_depth = i;        
+        g = grad_LL_ROP(params[1:rows(params)-config.n_choices+2] * rank_scales[i], dta, config2);
+        grad_coeffs = grad_coeffs + g[., 1:config.n_attr] * rank_scales[i];
+        grad_rs[., i] = grad_rs[., i] + sumr(g[., 1:config.n_attr] .* params[1:config.n_attr]' .* rank_scales[i]);
+        if i > 1;
+            config2.rank_depth = i-1;            
+            g = grad_LL_ROP(params[1:rows(params)-config.n_choices+2] * rank_scales[i], dta, config2);
+            grad_coeffs = grad_coeffs - g[., 1:config.n_attr] * rank_scales[i];
+            grad_rs[., i] = grad_rs[., i] - sumr(g[., 1:config.n_attr] .* params[1:config.n_attr]' .* rank_scales[i]);
+        endif;
+    endfor;
+    retp(grad_coeffs ~ grad_rs[., 2:config.n_choices-1]);
+endp;
+
+proc(1) = grad_AKroX(A, impact);
+    local ht, wd, grad;
+    ht = rows(impact) / rows(A);
+    wd = cols(impact) / cols(A);
+    grad = zeros(ht, wd);
+    for i(1, rows(impact), ht);
+        for j(1, cols(impact), wd);
+            grad = grad + A[i, j] .* impact[i:i+ht-1, j:j+wd-1];
+        endfor;
+    endfor;
+    retp(grad);
+endp;
+
+proc(2) = generate_dataset(error_type, n_rows, state);
+    local n_alt_attr, n_choices;
+    n_alt_attr = 2;
+    n_choices = 8;      
+    
+    local alt_beta, betas;
+    let alt_beta = 0 1 1 1 1 1 1 1;
+    let betas = 1 -1;
+    
+    local x_range, x_sd, x_mean;
+    x_range = 0.5;
+    x_sd = 1;
+    
+    local x, U, e;
+    x = zeros(n_rows, n_choices*n_alt_attr);
+    U = zeros(n_rows, n_choices);
+    e = zeros(n_rows, n_choices);
+    
+    local newstate, rands;
+    newstate = state;
+    for i(1, n_choices, 1);
+        x_mean = x_range - (i-1)/(n_choices-1)*x_range*2;
+        { rands, newstate } = rndn(n_rows, 1, newstate);
+        x[., ((i-1)*2 + 1)] = rands*x_sd + x_mean;
+        { rands, newstate } = rndn(n_rows, 1, newstate);
+        x[., ((i-1)*2 + 2)] = rands*x_sd - x_mean;
+        if error_type == "NORMAL";
+            {rands, newstate} = rndn(n_rows, 1, newstate);
+            rands = rands * pi/sqrt(6);        // To have same variance as Gumbel distribution
+        elseif error_type == "GUMBEL"; 
+            {rands, newstate} = rndGumbel(n_rows, 1, -digamma(1), 1, newstate);
+            rands = -rands;
+            // There are 2 forms of representing Gumbel Distribution which differes by a - sign
+            // To make GAUSS's Gumbel to the form in logit model_type, we need to multiply -
+        elseif error_type == "UNIFORM";
+            {rands, newstate} = rndu(n_rows, 1, newstate);
+            rands = (0.5 - rands)*sqrt(2)*pi;
+        elseif error_type == "LOGISTIC";
+            {rands, newstate} = rndLogistic(n_rows, 1, newstate);
+            rands = rands*1/sqrt(2);
+        else;
+            print "UNKNOWN ERROR TYPE USED FOR GENERATION";
+            end;
+        endif;
+        e[., i] = rands;
+        U[., i] = alt_beta[i] + 
+                  x[., ((i-1)*2 + 1)] * betas[1] + 
+                  x[., ((i-1)*2 + 2)] * betas[2] +                   
+                  e[., i];
+    endfor;
+    
+    local dta, R, y;
+    y = maxindc(U');
+    R = zeros(n_rows, n_choices);
+    for i(1, n_rows, 1);
+        R[i,.] = sortind(sortind(-U[i,.]'))';
+    endfor;
+    dta = x ~ e ~ U ~ R ~ y ~ ones(n_rows, 1) ~ zeros(n_rows, 1);
+    
+    struct ranking_config config;
+    config.n_obs = n_rows;
+    config.n_choices = n_choices;
+    config.n_attr = n_choices - 1 + n_alt_attr;
+    config.utility_cols = zeros(n_choices, config.n_attr);
+    for i(1, n_choices, 1);
+        config.utility_cols[i,.] = ones(1, n_choices - 1)*cols(dta) ~ (i-1)*2+1 ~ (i-1)*2+2;
+        if (i != 1);
+            config.utility_cols[i, i-1] = cols(dta) - 1;
+        endif;
+    endfor;
+    config.dependent_cols = seqa(n_alt_attr*n_choices + n_choices + n_choices + 1, 1, n_choices);
+    config.var_names = { ASC2, ASC3, ASC4, ASC5, ASC6, ASC7, ASC8, BX1, BX2 };
+    config.e_var = eye(n_choices)*pi^2/6;
+    config.error_unknown = 0;
+    config.rank_depth = n_choices - 1;
+    config.rank_scaling = 0;
+    
+    retp(dta, config);
+endp;
+
+proc(2) = rndLogistic(r, c, state);
+    local rands, newstate;
+    { rands, newstate } = rndu(r, c, state);
+    rands = ln(1 ./ rands - 1);
+    retp(rands, newstate);
+endp;
+
+proc(2) = grad_lncdfmvnaT(mean, var);
+    local junk, p, grad_mean, grad_var;
+    {p, grad_mean, grad_var, junk} = pdfmvnaT(mean, var, mean*0);
+    grad_var = matdup(grad_var);
+    grad_var = (grad_var + grad_var')/2;
+    grad_var = 1/p*grad_var;
+    grad_mean = 1/p*grad_mean;
+    retp(grad_mean, grad_var);
+endp;
+
+proc(1) = grad_Ax(A, impact);
+    local grad;
+    grad = (impact'*A)';
+    retp(grad);
+endp;
+
+proc(1) = grad_cholesky(var, var_chol, impact);
+    local grad;
+    grad = gcholeskycov(var);
+    
+    local size;
+    size = rows(var);
+    // The same var matrix is generated if var_chol[size, size] is -ve or +ve
+    // Making this correction because gcholeskycov assumes var_chol[size, size] is +ve
+    if var_chol[size, size] < 0;
+        grad[size*(size+1)/2,.] = -grad[size*(size+1)/2,.];
+    endif;
+    
+    impact = 2*impact-(eye(rows(impact)).*impact);
+    impact = vecdup(impact);
+    grad = sumr(grad .* impact');
+    grad = matdup(grad);
+    retp(grad');
+endp;
+
+proc(1) = grad_A_X_A(A, impact);
+    /*
+    y = A*X*A'
+    Let 'impact' be the matrix giving the impact (gradient) of each element of y
+    If A is a I*J matrix, impact must be a I*I matrix
+    The gradient matrix of y matrix with respect to each element of X is calculated.
+    The gradient matrix is .* with the impact matrix and the elements are summed to calculate the impact of
+    each element of X matrix.
+    */
+    local diff, size, reindex, impact_size, grad;
+    diff = A'.*.A';
+    size = cols(A);
+    impact_size = rows(A);
+    impact = reshape(impact, 1, impact_size*impact_size);
+    grad = sumr(diff .* impact);
+    grad = reshape(grad, size, size);
+    retp(grad);
+endp;
+
+proc(0) = test_model_MNP_Last();
+    local dta, init_params;
+    struct ranking_config config;
+    {dta, config} = generate_dataset("NORMAL", 5000, 1);
+    global_config = config;
+    init_params = ones(global_config.n_attr, 1)*.5;
+    
+    _max_Options = { bfgs stepbt };
+    _max_gradTol = .5e-4;
+    _max_Maxiters = 5000;
+    maxprt(maxlik(dta, 0, &maxlik_MNP_Last, init_params));
+    
+endp;
+
+/*
+Given below are wrappers of likelihood functions to be used with maxlik. 
+Wrappers to the original likelihood functions were made because maxlik does not allow you to send 
+extra information to the likelihood functions such as rank depth or whether the error matrix is 
+also being estimated.
+*/
+
+proc(1) = maxlik_MNP_RL(params, dta);
+    retp(LL_MNP_RL(params, dta, global_config));
+endp;
+
+proc(1) = maxlik_gMNP_RL(params, dta);
+    retp(grad_LL_MNP_RL(params, dta, global_config));
+endp;
+
+proc(1) = maxlik_ROL(params, dta);
+    retp(LL_ROL(params, dta, global_config));
+endp;
+
+proc(1) = maxlik_ROP(params, dta);
+    retp(LL_ROP(params, dta, global_config));
+endp;
+
+proc(1) = maxlik_gROP(params, dta);
+    retp(grad_LL_ROP(params, dta, global_config));
+endp;
+
+proc(1) = maxlik_MNL_RL(params, dta);
+    retp(LL_MNL_RL(params, dta, global_config));
+endp;
+
+proc(1) = maxlik_MNL_Last(params, dta);
+    retp(LL_MNL_Last(params, dta, global_config));
+endp;
+
+proc(1) = maxlik_MNP_Last(params, dta);
+    retp(LL_MNP_Last(params, dta, global_config));
+endp;
+
+proc(1) = maxlik_gMNP_Last(params, dta);
+    retp(grad_LL_MNP_Last(params, dta, global_config));
+endp;

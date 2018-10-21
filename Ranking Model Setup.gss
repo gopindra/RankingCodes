@@ -1,0 +1,184 @@
+// @author: Gopindra Sivakumar Nair (2018)
+
+/*
+Please cite,
+    Nair, G.S., C.R. Bhat, R.M. Pendyala, B.P.Y. Loo, and W.H.K. Lam, "On the Use of Probit Based Models for Ranking Data Analysis"
+if using this code.
+*/
+
+new;
+
+library maxlik, rankingmodels;
+maxset;
+
+/* Configuration starts here **********************************************************************/
+    
+    /* Set input file location */
+    dataset = "C:/Users/gs27556/Box Sync/IATBR/Datasets/Game/game.csv";
+    dataset = "C:/Users/gs27556/Box Sync/IATBR/Code/Code Release/game.csv";
+    
+    /* Dataset */
+    n_obs = 91;                                 // No. of observations
+    
+    // Indpendent variables in utility equation of different alternatives.
+    // Each row represents the utility of an alternative.
+    // Use SERO to indicate 0 and UNO to indicate 1
+    utility_eqs = 
+        {   SERO    SERO    SERO    SERO    SERO    OWN_PC      SERO    SERO    SERO    SERO    SERO,
+            UNO     SERO    SERO    SERO    SERO    OWN_PS      HOURS   SERO    SERO    SERO    SERO,
+            SERO    UNO     SERO    SERO    SERO    OWN_PSP     SERO    HOURS   SERO    SERO    SERO,
+            SERO    SERO    UNO     SERO    SERO    OWN_GC      SERO    SERO    HOURS   SERO    SERO,
+            SERO    SERO    SERO    UNO     SERO    OWN_GB      SERO    SERO    SERO    HOURS   SERO,
+            SERO    SERO    SERO    SERO    UNO     OWN_XBOX    SERO    SERO    SERO    SERO    HOURS  };
+    n_choices = rows(utility_eqs);
+    n_attr = cols(utility_eqs);
+    
+    // Names of parameters to be estimated. Note: cols(var_names) == cols(utility_eqs)
+    var_names = { ASC_PS, ASC_PSP, ASC_GC, ASC_GB, ASC_XBOX, OWN, HRS_PS, HRS_PSP, HRS_GC, HRS_GB, HRS_XBOX };    
+    
+    // Column names of the dependent variables.
+    // Note that the order of alternatives here must be the same as the order in which utilities
+    // were entered in the variable utility_eqs.
+    dependent_variables = { R_PC,   R_PS,	R_PSP,	R_GC,	R_GB,	R_XBOX };
+    
+    /* Estimation Settings */
+    
+    ALL_MODEL_TYPES = { ROL, ROP, MNL_Last, MNP_Last, MNL_RL, MNP_RL };
+    model_type = "ROP";     // Choose a model from above
+    
+    // Applicable to models,
+    // ROL, ROP: Rank level up to which ranking sequence is to be considered for estimation
+    // MNL_RL, MNP_RL: Rank level at which likelihood of choice is to be calculated
+    rank_depth = 5;
+    
+    // Applicable to models,
+    // ROP, MNP_Last, MNP_RL: The variance matrix of errros in probit based models.
+    e_var = eye(n_choices)*pi^2/6;
+    
+    // Applicable to models, 
+    // ROL, ROP: 1 or 0 based on whether to use heteroskedastic version of the model or not
+    rank_scaling = 1;
+
+/* Configuration end here *************************************************************************/
+    
+/* Configuration parameters in beta */
+
+    // Applicable to models, 
+    // ROP, MNP_RL, MNP_Last: 1 or 0 based on whether error matrix is also to be estimated.
+    // In this version, the functionality when error_unknown = 1 is not very robust. The estimation
+    // may not complete for some intial parameters. A common issue that may occur is the term,
+    // L_<n_choices-1><n_choices-1> takes a small negative value in which case the estimation procedure
+    // may get stuck.
+    error_unknown = 0;
+    
+/* Pre-processing */
+    
+    rank_depth = minc(rank_depth|n_choices - 1);
+    if strindx(dataset, ".csv", 1) > 0;
+        dataset_formatted = strput(".dat", dataset, strindx(dataset, ".csv", 1));
+        convert_csv_to_dat(dataset, dataset_formatted);
+    else;
+        dataset_formatted = dataset;
+    endif;
+    { junk, rank_indices } = indices(dataset_formatted, dependent_variables);
+    x_ind = utility_eqs * 0;
+    for i(1, n_choices, 1);
+        {junk, x_ind[i,.]} = (indices(dataset_formatted, (utility_eqs[i,.])'))';
+    endfor;
+
+/* Constant Library Golbals */
+     
+    _max_Options = { bfgs stepbt };
+    _max_gradTol = .5e-5;
+    _max_Maxiters = 500;
+    
+/* Setting Configuration in global_config */
+    
+    #include rankingmodels.ext
+    global_config.n_obs = n_obs;
+    global_config.utility_cols = x_ind;
+    global_config.dependent_cols = rank_indices;
+    global_config.n_choices = n_choices;
+    global_config.n_attr = n_attr;
+    global_config.var_names = var_names;
+    global_config.e_var = e_var;
+    global_config.error_unknown = error_unknown;
+    global_config.rank_depth = rank_depth;
+    global_config.rank_scaling = rank_scaling;
+    
+init_params = zeros(n_attr, 1);
+param_mask = ones(n_attr, 1);
+param_names = stocv("B") $+ var_names;
+
+if error_unknown == 1;
+    error_init = vech(eye(n_choices-1));
+    error_param_mask = ones(rows(error_init), 1);
+    error_param_mask[1] = 0;
+    e_chol_names = {};
+    for i(1, n_choices-1, 1);
+        for j(1, i, 1);
+            e_chol_names = e_chol_names | stocv("L")$+ftostrC(i, "%.0f")$+ftostrC(j, "%.0f");
+        endfor;
+    endfor;
+    init_params = init_params | error_init;
+    param_mask = param_mask | error_param_mask;
+    param_names = param_names | e_chol_names;
+endif;
+
+if rank_scaling == 1;
+    init_params = init_params | ones(n_choices-2, 1);
+    rs_mask = zeros(n_choices-2, 1);
+    rs_mask[1:rank_depth-1] = ones(rank_depth-1, 1);
+    param_mask = param_mask | rs_mask;
+    param_names = param_names | stocv("RS")$+ftocv(seqa(2, 1, n_choices-2), 2, 0);
+endif;
+    
+proc(0) = convert_csv_to_dat(csv_file, dat_file);
+    local row_range, headers, dat, op_file, n_rows;    
+    let row_range = 1 1;
+    headers = csvReadSA(csv_file, row_range);
+    dat = csvReadM(csv_file, 2);
+    create op_file = ^dat_file with ^headers, 0, 8;
+    n_rows = writer(op_file, dat);
+    op_file = close(op_file);
+endp;
+
+_max_active = param_mask;
+_max_parNames = param_names;
+
+if model_type == "ROP";
+    _max_gradProc = &maxlik_gROP;
+    ll_func = &maxlik_ROP;
+elseif model_type == "ROL";
+    _max_gradProc = 0;
+    ll_func = &maxlik_ROL;
+elseif model_type == "MNP_RL";
+    _max_gradProc = &maxlik_gMNP_RL;
+    ll_func = &maxlik_MNP_RL;
+elseif model_type == "MNL_RL";
+    _max_gradProc = 0;
+    ll_func = &maxlik_MNL_RL;
+elseif model_type == "MNL_Last";
+    _max_gradProc = 0;
+    ll_func = &maxlik_MNL_Last;
+elseif model_type == "MNP_Last";
+    _max_gradProc = &maxlik_gMNP_Last;
+    ll_func = &maxlik_MNP_Last;
+endif;
+
+{ final_params, min_val, final_grad, junk, junk } = maxprt(maxlik(dataset_formatted,0,ll_func,init_params));
+
+if error_unknown;
+    e_var_params = final_params[n_attr+1:n_attr+n_choices*(n_choices-1)/2];
+    e_var_chol = lowmat(xpnd(e_var_params));
+    e_var2 = zeros(n_choices, n_choices);
+    e_var2[2:n_choices, 2:n_choices] = e_var_chol*e_var_chol';
+    print "Estimated error matrix";
+    print e_var2;
+endif;
+
+print "Rank Depth: " rank_depth;
+print "error_unknown: " error_unknown;
+print "rank_scaling: " rank_scaling;
+print "model_type: " model_type;
+

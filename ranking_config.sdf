@@ -1,0 +1,14 @@
+// @author: Gopindra Sivakumar Nair (2018)
+
+struct ranking_config {
+    matrix n_obs;
+    matrix utility_cols;
+    matrix dependent_cols;
+    matrix n_choices;
+    matrix n_attr;
+    matrix var_names;
+    matrix e_var;
+    matrix error_unknown;
+    matrix rank_depth;
+    matrix rank_scaling;
+};

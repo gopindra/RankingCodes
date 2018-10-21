@@ -1,0 +1,4 @@
+// @author: Gopindra Sivakumar Nair (2018)
+
+#include ranking_config.sdf
+external struct ranking_config global_config;
