@@ -43,30 +43,6 @@ proc (1) = get_rank_mask(ranks, rank_depth);
 endp;
 
 /*
-Creates the mask matrix which when premultiplied to utility vector generates the vector 
-of differences in utilities that should be less than zero for the last ranked alternative 
-to have lowest utility.
-ranks:       The vector of ranks given to alternatives 1, 2, 3, ....
-Eg:
-let ranks = 5 3 6 2 4 1;
-get_rank_mask(ranks);
-      -1.0000000       0.00000000        1.0000000       0.00000000       0.00000000       0.00000000 
-      0.00000000       -1.0000000        1.0000000       0.00000000       0.00000000       0.00000000 
-      0.00000000       0.00000000        1.0000000       -1.0000000       0.00000000       0.00000000 
-      0.00000000       0.00000000        1.0000000       0.00000000       -1.0000000       0.00000000 
-      0.00000000       0.00000000        1.0000000       0.00000000       0.00000000       -1.0000000
-*/
-proc (1) = get_worst_mask(ranks);
-    local M, n_choices, worst_choice;
-    n_choices = rows(ranks);
-    worst_choice = maxindc(ranks);
-    M = -eye(n_choices);
-    M = delrows(M, worst_choice);
-    M[., worst_choice] = ones(rows(M), 1);
-    retp(M);
-endp;
-
-/*
 Log-likelihood function for Rank Ordered Probit model
 */
 proc(1) = LL_ROP(params, dta, struct ranking_config config);
@@ -300,116 +276,6 @@ proc(1) = LL_MNL_RL(params, dta, struct ranking_config config);
 endp;
 
 /*
-Computes the likelihood of the last ranked alternative being selected last.
-Utilities are like in Multinomial Logit model.
-*/
-proc(1) = LL_MNL_Last(params, dta, struct ranking_config config);
-    
-    local beta_means, x, y, prefs, U, p, lll, combos;
-    lll = zeros(rows(dta), 1);
-    beta_means = params[1:config.n_attr];
-    
-    threadfor i(1, rows(dta), 1);
-        x = reshape(dta[i, config.utility_cols], config.n_choices, config.n_attr);
-        y = dta[i, config.dependent_cols]';
-        U = x*beta_means;
-        prefs = sortind(y);
-        p = 1;
-        for j(1, config.n_choices-1, 1);
-            combos = combinate(config.n_choices-1, j);
-            for combo_i(1, rows(combos), 1);               
-                p = p + ((-1)^j) * exp(U[prefs[config.n_choices]]) / (exp(U[prefs[config.n_choices]]) + sumc(exp(U[prefs[combos[combo_i,.]]])));
-            endfor;
-        endfor;
-        lll[i] = ln(p);
-    threadendfor;
-    retp(sumc(lll));
-    
-endp;
-
-/*
-Computes the likelihood of the last ranked alternative being selected last.
-Utilities are like in Multinomial Probit model.
-*/
-proc(1) = LL_MNP_Last(params, dta, struct ranking_config config);
-    
-    local beta_means;
-    beta_means = params[1:config.n_attr];
-    
-    local e_var2;
-    if config.error_unknown == 1;
-        local e_var_params, e_var_chol;
-        e_var_params = params[config.n_attr+1:config.n_attr+config.n_choices*(config.n_choices-1)/2];
-        e_var_chol = lowmat(xpnd(e_var_params));
-        e_var2 = zeros(config.n_choices, config.n_choices);
-        e_var2[2:config.n_choices, 2:config.n_choices] = e_var_chol*e_var_chol';
-    else;
-        e_var2 = config.e_var;
-    endif;
-    
-    local x, y, M, Mx, MU_mean, MU_var, lll, p;
-    lll = zeros(rows(dta), 1);
-
-    threadfor i(1, rows(dta), 1);
-        x = reshape(dta[i, config.utility_cols], config.n_choices, config.n_attr);
-        y = dta[i, config.dependent_cols]';
-        M = get_worst_mask(y);
-        Mx = M*x;
-        MU_mean = Mx*beta_means;
-        MU_var = M * e_var2 * M';
-        p = cdfmvnaT(MU_mean, MU_var, MU_mean*0);
-        lll[i] = ln(p);
-    threadendfor;
-    retp(lll);
-    
-endp;
-
-/*
-Gradient of LL_MNP_Last with respect to params
-*/
-proc(1) = grad_LL_MNP_Last(params, dta, struct ranking_config config);
-    
-    local e_var2;
-    if config.error_unknown == 1;
-        local e_var_params, e_var_chol;
-        e_var_params = params[config.n_attr+1:config.n_attr+config.n_choices*(config.n_choices-1)/2];
-        e_var_chol = lowmat(xpnd(e_var_params));
-        e_var2 = zeros(config.n_choices, config.n_choices);
-        e_var2[2:config.n_choices, 2:config.n_choices] = e_var_chol*e_var_chol';
-    else;
-        e_var2 = config.e_var;
-    endif;
-    
-    local beta_means;
-    beta_means = params[1:config.n_attr];
-    
-    local gradients;  
-    gradients = zeros(rows(dta), rows(params));
-    
-    local x, y, M, Mx, MU_mean, MU_var, lll;
-    local grad_mean, grad_var, grad_beta_mean, grad_e_var, grad_e_var_cholesky, grads;
-    threadfor i(1, rows(dta), 1);
-        x = reshape(dta[i, config.utility_cols], config.n_choices, config.n_attr);
-        y = dta[i, config.dependent_cols]';
-        M = get_worst_mask(y);
-        Mx = M*x;
-        MU_mean = Mx*beta_means;
-        MU_var = M * e_var2 * M';      
-        {grad_mean, grad_var} = grad_lncdfmvnaT(MU_mean, MU_var);
-        grad_beta_mean = grad_Ax(Mx, grad_mean);
-        grads = grad_beta_mean';
-        if config.error_unknown == 1;
-            grad_e_var = grad_A_X_A(M, grad_var);
-            grad_e_var_cholesky = grad_cholesky(e_var2[2:config.n_choices, 2:config.n_choices], e_var_chol, grad_e_var[2:config.n_choices, 2:config.n_choices]);
-            grads = grads ~ vech(grad_e_var_cholesky)';
-        endif;
-        gradients[i,.] = grads;
-    threadendfor;
-    retp(gradients);
-    
-endp;
-
-/*
 Log-likelihood function for heteroskedastic rank ordered probit model
 */
 proc(1) = LL_HROP(params, dta, struct ranking_config config);
@@ -612,20 +478,6 @@ proc(1) = grad_A_X_A(A, impact);
     retp(grad);
 endp;
 
-proc(0) = test_model_MNP_Last();
-    local dta, init_params;
-    struct ranking_config config;
-    {dta, config} = generate_dataset("NORMAL", 5000, 1);
-    global_config = config;
-    init_params = ones(global_config.n_attr, 1)*.5;
-    
-    _max_Options = { bfgs stepbt };
-    _max_gradTol = .5e-4;
-    _max_Maxiters = 5000;
-    maxprt(maxlik(dta, 0, &maxlik_MNP_Last, init_params));
-    
-endp;
-
 /*
 Given below are wrappers of likelihood functions to be used with maxlik. 
 Wrappers to the original likelihood functions were made because maxlik does not allow you to send 
@@ -655,16 +507,4 @@ endp;
 
 proc(1) = maxlik_MNL_RL(params, dta);
     retp(LL_MNL_RL(params, dta, global_config));
-endp;
-
-proc(1) = maxlik_MNL_Last(params, dta);
-    retp(LL_MNL_Last(params, dta, global_config));
-endp;
-
-proc(1) = maxlik_MNP_Last(params, dta);
-    retp(LL_MNP_Last(params, dta, global_config));
-endp;
-
-proc(1) = maxlik_gMNP_Last(params, dta);
-    retp(grad_LL_MNP_Last(params, dta, global_config));
 endp;
